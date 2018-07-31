@@ -3,4 +3,4 @@
 
 ---
 
-Using tini to start
+Using tini to start the service
