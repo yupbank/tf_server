@@ -1,29 +1,86 @@
+# Copyright 2018 Google LLC
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     https://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
 FROM ubuntu:16.04
 
+ARG TF_SERVING_VERSION_GIT_BRANCH=master
+ARG TF_SERVING_VERSION_GIT_COMMIT=head
+
+LABEL maintainer=gvasudevan@google.com
+LABEL tensorflow_serving_github_branchtag=${TF_SERVING_VERSION_GIT_BRANCH}
+LABEL tensorflow_serving_github_commit=${TF_SERVING_VERSION_GIT_COMMIT}
+
 RUN apt-get update && apt-get install -y \
+        automake \
+        build-essential \
         curl \
-        gnupg
+        git \
+        libcurl3-dev \
+        libfreetype6-dev \
+        libpng12-dev \
+        libtool \
+        libzmq3-dev \
+        mlocate \
+        openjdk-8-jdk\
+        openjdk-8-jre-headless \
+        pkg-config \
+        python-dev \
+        python-numpy \
+        python-pip \
+        software-properties-common \
+        swig \
+        wget \
+        zip \
+        zlib1g-dev \
+        && \
+    apt-get clean && \
+    rm -rf /var/lib/apt/lists/*
 
-# Add TensorFlow Serving repo
+# Set up grpc
+RUN pip install mock grpcio
 
-RUN echo "deb [arch=amd64] http://storage.googleapis.com/tensorflow-serving-apt stable tensorflow-model-server tensorflow-model-server-universal" | tee /etc/apt/sources.list.d/tensorflow-serving.list
-# Ignore the warning about using apt-key output - we are not
-ENV APT_KEY_DONT_WARN_ON_DANGEROUS_USAGE=1
-RUN curl -s https://storage.googleapis.com/tensorflow-serving-apt/tensorflow-serving.release.pub.gpg | apt-key add -
+# Set up Bazel
+# Need >= 0.15.0 so bazel compiles work with docker bind mounts.
+ENV BAZEL_VERSION 0.15.0
+WORKDIR /
+RUN mkdir /bazel && \
+    cd /bazel && \
+    curl -H "User-Agent: Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/57.0.2987.133 Safari/537.36" -fSsL -O https://github.com/bazelbuild/bazel/releases/download/$BAZEL_VERSION/bazel-$BAZEL_VERSION-installer-linux-x86_64.sh && \
+    curl -H "User-Agent: Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/57.0.2987.133 Safari/537.36" -fSsL -o /bazel/LICENSE.txt https://raw.githubusercontent.com/bazelbuild/bazel/master/LICENSE && \
+    chmod +x bazel-*.sh && \
+    ./bazel-$BAZEL_VERSION-installer-linux-x86_64.sh && \
+    cd / && \
+    rm -f /bazel/bazel-$BAZEL_VERSION-installer-linux-x86_64.sh
 
-# Get the model-server, use tensorflow-model-server-universal for older hardware
-RUN apt-get update && apt-get install -y \
-        tensorflow-model-server
+# Download TF Serving sources (optionally at specific commit).
+WORKDIR /tensorflow-serving
+RUN git clone --branch=${TF_SERVING_VERSION_GIT_BRANCH} https://github.com/tensorflow/serving . && \
+    git remote add upstream https://github.com/tensorflow/serving.git && \
+    if [ "${TF_SERVING_VERSION_GIT_COMMIT}" != "head" ]; then git checkout ${TF_SERVING_VERSION_GIT_COMMIT} ; fi
 
-# Cleanup to reduce the size of the image
-# See https://docs.docker.com/develop/develop-images/dockerfile_best-practices/#run
-RUN  apt-get clean && \
-        rm -rf /var/lib/apt/lists/*
+# Build, and install TensorFlow Serving
+ARG TF_SERVING_BUILD_OPTIONS="--copt=-mavx --cxxopt=-D_GLIBCXX_USE_CXX11_ABI=0"
+ARG TF_SERVING_BAZEL_OPTIONS="--action_env TF_REVISION=63c54eab8c7d526d49ecbb441e12a81b86dfdeaa"
 
-ENV TINI_VERSION v0.17.0
+RUN bazel build -c opt --color=yes --curses=yes \
+    ${TF_SERVING_BAZEL_OPTIONS} \
+    --verbose_failures \
+    --output_filter=DONT_MATCH_ANYTHING \
+    ${TF_SERVING_BUILD_OPTIONS} \
+    tensorflow_serving/model_servers:tensorflow_model_server && \
+    cp bazel-bin/tensorflow_serving/model_servers/tensorflow_model_server /usr/local/bin/ && \
+    bazel clean --expunge --color=yes && \
+    rm -rf /root/.cache
+# Clean up Bazel cache when done.
 
-ADD https://github.com/krallin/tini/releases/download/${TINI_VERSION}/tini /tini
-
-RUN chmod +x /tini
-
-ENTRYPOINT ["/tini", "--"]
+CMD ["/bin/bash"]
